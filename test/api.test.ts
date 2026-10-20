@@ -190,6 +190,21 @@ describe("http api", () => {
     assert.equal(body.error, "too_many_ids");
   });
 
+  test("batch mandate lookup accepts repeated ids params", async () => {
+    const { status, body } = await get("/api/mandates?ids=1&ids=2");
+    assert.equal(status, 200);
+    const rows = body.mandates as unknown as { id: number }[];
+    assert.deepEqual(rows.map((r) => r.id), [2, 1]);
+  });
+
+  test("bracketed query keys are not parsed into objects or arrays", async () => {
+    // Express 5's "simple" query parser: `ids[]` is an unrelated key, so the
+    // filter is not applied rather than being coerced from an array/object.
+    const { status, body } = await get("/api/mandates?ids[]=999&subscriber[x]=nobody");
+    assert.equal(status, 200);
+    assert.ok((body.mandates as unknown[]).length >= 2);
+  });
+
   test("batch mandate lookup rejects a non-numeric id", async () => {
     const { status, body } = await get("/api/mandates?ids=1,nope");
     assert.equal(status, 400);
