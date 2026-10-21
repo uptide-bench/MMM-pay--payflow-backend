@@ -164,6 +164,24 @@ describe("http api", () => {
     assert.equal((none.body.plans as unknown[]).length, 0);
   });
 
+  test("bracketed query params still filter rather than being ignored", async () => {
+    const none = await get("/api/plans?merchant[]=GNOBODY");
+    assert.equal((none.body.plans as unknown[]).length, 0);
+
+    const mine = await get(`/api/plans?merchant[]=${MERCHANT}`);
+    assert.equal((mine.body.plans as unknown[]).length, 1);
+  });
+
+  test("malformed JSON body is handled by the error middleware", async () => {
+    const res = await fetch(`${base}/api/plans`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 500);
+    assert.deepEqual(await res.json(), { error: "internal_error" });
+  });
+
   test("unknown plan is 404", async () => {
     const { status } = await get("/api/plans/999");
     assert.equal(status, 404);

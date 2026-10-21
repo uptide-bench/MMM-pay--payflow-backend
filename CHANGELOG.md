@@ -70,7 +70,10 @@ All notable changes to payflow-backend. The format follows
   running rather than overlapping it.
 
 ### Changed
-
+- **Express 5.** Upgraded `express` 4.22 → 5.3 (and `@types/express` to 5).
+  The app pins `query parser` to `"extended"` so bracketed query params keep
+  their Express 4 meaning instead of being dropped by Express 5's default
+  `"simple"` parser, which would have silently widened filtered listings.
 - **Summary query indexes (#66).** Covering indexes for the merchant and
   subscriber summary aggregates (`mandates(merchant, status, period, amount)`,
   `charges(merchant, amount)`, `charges(subscriber, amount, fee)`) are added
