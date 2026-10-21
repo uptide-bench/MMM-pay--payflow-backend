@@ -12,6 +12,66 @@ import type { RpcStatus } from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
 import { withSpan } from "./lib/telemetry.ts";
 
+/**
+ * The shape of a failure that is safe to put in a log line.
+ *
+ * Express 5 funnels every rejected handler and every middleware failure —
+ * including the body parser's — through the boundary below, and those error
+ * objects carry the caller's payload: `body-parser` hangs the raw request body
+ * off `err.body`, and pino serializes an error's own enumerable properties.
+ * `KEEPER_SECRET` and anything else posted to the API must not reach a log
+ * aggregator, so a fresh error carries only the original type, its message and
+ * stack, plus the HTTP status when the failure already has one.
+ */
+export function loggableError(err: unknown): Error {
+  const e = err instanceof Error ? err : new Error(String(err));
+  const withStatus = e as Error & { status?: unknown; statusCode?: unknown };
+  const status =
+    typeof withStatus.statusCode === "number"
+      ? withStatus.statusCode
+      : typeof withStatus.status === "number"
+        ? withStatus.status
+        : undefined;
+  const safe: Error & { status?: number } = new Error(e.message);
+  // A fresh error, so nothing the caller left on the original — `body-parser`'s
+  // `err.body` above all — is enumerable for pino to copy into the log line.
+  // The prototype is carried over, which is what pino reports as `err.type`.
+  Object.setPrototypeOf(safe, Object.getPrototypeOf(e));
+  if (e.stack !== undefined) safe.stack = e.stack;
+  if (status !== undefined) safe.status = status;
+  return safe;
+}
+
+/**
+ * The API's only error boundary.
+ *
+ * Express 5 awaits a handler's return value and forwards a rejected promise to
+ * the error middleware, so an `async` route no longer needs a manual
+ * `try`/`catch` to avoid a dangling request or an unhandled rejection: any
+ * failure — thrown synchronously or from a rejected promise — lands here and
+ * becomes a 500.
+ *
+ * Neither half of the contract leaks: the body is a fixed shape because
+ * `err.message` can carry a bound SQL value or an RPC URL, and the log line is
+ * `loggableError(err)` for the same reason.
+ */
+export function errorHandler(
+  err: Error,
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  // A handler that fails after the response has started cannot be turned into
+  // a 500; hand the error back so Express ends the request instead of this
+  // handler throwing ERR_HTTP_HEADERS_SENT from inside itself.
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  logger.error({ err: loggableError(err) }, "unhandled request error");
+  res.status(500).json({ error: "internal_error" });
+}
+
 /** Ledgers the indexer may trail the network by before it is considered behind. */
 const MAX_LAG = 120;
 
@@ -132,14 +192,15 @@ export function createApp(
   app.use("/api", buildRoutes(db, merchantCache, config.TOKEN_ID));
 
 
+  // Anything no route answered: an unknown path, or a method the API does not
+  // expose on a known one.
   app.use((_req, res) => {
     res.status(404).json({ error: "not_found" });
   });
 
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    logger.error({ err }, "unhandled request error");
-    res.status(500).json({ error: "internal_error" });
-  });
+  // Four arguments, so Express treats this as the error middleware and routes
+  // every forwarded failure — including a rejected async handler — to it.
+  app.use(errorHandler);
 
   return app;
 }

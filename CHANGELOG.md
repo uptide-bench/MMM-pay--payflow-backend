@@ -84,6 +84,20 @@ All notable changes to payflow-backend. The format follows
   query handling and response shapes are identical and the existing API
   tests pass unchanged.
 
+- **Express 5 (#77).** `express` and `@types/express` move to 5.x. No removed
+  API was in use — no `app.del`, no `res.send(status)`, no wildcard or
+  regex paths for path-to-regexp v8 to reject — so routes and response shapes
+  are untouched and payflow-frontend needs no migration note. What does change
+  is where a failure lands: Express 5 awaits a handler's result and forwards a
+  rejected promise to the error middleware, so an `async` route no longer needs
+  a manual `try`/`catch` to avoid leaving the caller hanging with an unhandled
+  rejection. The four-argument handler in `src/app.ts` is now the single
+  boundary for every failure, is exported as `errorHandler`, hands back errors
+  whose response has already started, and logs `loggableError(err)` (type,
+  message, status, stack) instead of the raw error — `body-parser` hangs the
+  caller's request body off its `SyntaxError`, and that must not reach a log
+  line.
+
 ### Fixed
 
 - **Merchant totals no longer mix tokens (#56).** `/api/merchants/:address/summary`

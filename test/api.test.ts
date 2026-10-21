@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, mock } from "node:test";
 import type { Server } from "node:http";
+import express, { type Express, type Request, type Response } from "express";
 import { openDatabase } from "../src/lib/db.ts";
-import { createApp } from "../src/app.ts";
+import { createApp, errorHandler, loggableError } from "../src/app.ts";
+import { logger } from "../src/lib/logger.ts";
 import { Indexer } from "../src/indexer.ts";
 import type { Config } from "../src/config.ts";
 import type { DecodedEvent } from "../src/lib/stellar.ts";
@@ -718,5 +720,149 @@ describe("subscriber upcoming charges", () => {
     assert.deepEqual(body.upcoming, []);
     assert.equal(body.totalUpcoming, "0");
     assert.equal(body.truncated, false);
+  });
+});
+
+describe("express 5 error boundary", () => {
+  /** Listens on a random port and reports the base URL with a stop function. */
+  async function serve(app: Express): Promise<{ url: string; stop: () => Promise<void> }> {
+    const listener: Server = await new Promise((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = listener.address();
+    return {
+      url: `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`,
+      stop: () => new Promise<void>((resolve) => void listener.close(() => resolve())),
+    };
+  }
+
+  test("an async handler rejection is answered 500, not left as an unhandled rejection", async () => {
+    const reasons: unknown[] = [];
+    const watch = (reason: unknown): void => {
+      reasons.push(reason);
+    };
+    process.on("unhandledRejection", watch);
+
+    const app = express();
+    // Under Express 4 this rejection was swallowed: the caller's request hung
+    // until it timed out and the failure surfaced on the process instead.
+    // Express 5 awaits the handler and forwards the rejection to the boundary.
+    app.get("/boom", async () => {
+      throw new Error("rpc https://rpc.example/?token=KEEPER_SECRET exploded");
+    });
+    app.use(errorHandler);
+
+    const srv = await serve(app);
+    try {
+      const res = await fetch(`${srv.url}/boom`, { signal: AbortSignal.timeout(5_000) });
+      assert.equal(res.status, 500);
+      // The fixed shape also proves nothing of the message reached the caller.
+      assert.deepEqual(await res.json(), { error: "internal_error" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(reasons, []);
+    } finally {
+      process.off("unhandledRejection", watch);
+      await srv.stop();
+    }
+  });
+
+  test("a failure raised inside the app's own middleware reaches the boundary", async () => {
+    const app = createApp(db, config, status);
+    const srv = await serve(app);
+    // The boundary's own log line is captured instead of written, so the test
+    // can assert what a log aggregator would have received.
+    const lines: unknown[][] = [];
+    mock.method(logger, "error", (...args: unknown[]): void => {
+      lines.push(args);
+    });
+    try {
+      // Truncated JSON: the body parser rejects asynchronously, so Express 5
+      // hands the SyntaxError to the boundary instead of hanging the request.
+      const res = await fetch(`${srv.url}/api/plans`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"KEEPER_SECRET":"do-not-log-me"',
+        signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(res.status, 500);
+      // Neither the parser's message nor any part of the request body leaks.
+      assert.deepEqual(await res.json(), { error: "internal_error" });
+
+      // pino is called as `logger.error(obj, msg)`; only the boundary's own
+      // line is inspected, as a request line holds a live IncomingMessage.
+      const boundary = lines.filter((args) => args[1] === "unhandled request error");
+      assert.equal(boundary.length, 1);
+      const logged = (boundary[0]![0] as { err: Error & { body?: unknown } }).err;
+      assert.ok(logged);
+      assert.equal(logged.name, "SyntaxError");
+      // The parser hangs the raw body off its error; that must not survive.
+      assert.equal("body" in logged, false);
+      assert.ok(!logged.message.includes("do-not-log-me"));
+      assert.ok(!(logged.stack ?? "").includes("do-not-log-me"));
+    } finally {
+      mock.restoreAll();
+      await srv.stop();
+    }
+  });
+
+  test("strips the caller's payload from the logged error", () => {
+    // body-parser hangs the raw request body off its error, and pino would
+    // serialize it as an own enumerable property of `err`.
+    const err = Object.assign(new SyntaxError("Unexpected end of JSON input"), {
+      body: '{"KEEPER_SECRET":"do-not-log-me"}',
+      statusCode: 400,
+      expose: true,
+    });
+    const kept = loggableError(err);
+    assert.equal(kept.name, "SyntaxError");
+    assert.equal(kept.message, "Unexpected end of JSON input");
+    // The status is a number and survives; the payload does not.
+    assert.equal((kept as Error & { status?: number }).status, 400);
+    assert.equal("body" in kept, false);
+    assert.equal("expose" in kept, false);
+    assert.ok(!(kept.stack ?? "").includes("do-not-log-me"));
+  });
+
+  test("answers a fixed shape and never echoes the failure", () => {
+    let code = 0;
+    let sent: unknown;
+    const res = {
+      headersSent: false,
+      status(status: number) {
+        code = status;
+        return this;
+      },
+      json(body: unknown) {
+        sent = body;
+        return this;
+      },
+    } as unknown as Response;
+
+    errorHandler(
+      new Error("mandate 7 rejected https://rpc.example/?token=KEEPER_SECRET"),
+      {} as Request,
+      res,
+      () => {},
+    );
+    assert.equal(code, 500);
+    assert.deepEqual(sent, { error: "internal_error" });
+  });
+
+  test("hands back a response whose headers are already out", () => {
+    let forwarded: unknown;
+    const res = {
+      headersSent: true,
+      status(): never {
+        throw new Error("ERR_HTTP_HEADERS_SENT");
+      },
+      json(): never {
+        throw new Error("ERR_HTTP_HEADERS_SENT");
+      },
+    } as unknown as Response;
+
+    errorHandler(new Error("late failure"), {} as Request, res, (err?: unknown) => {
+      forwarded = err;
+    });
+    assert.match(String((forwarded as Error).message), /late failure/);
   });
 });
