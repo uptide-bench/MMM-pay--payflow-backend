@@ -71,6 +71,13 @@ All notable changes to payflow-backend. The format follows
 
 ### Changed
 
+- **Express 5.** Upgraded `express` 4.22 → 5.3 (and `@types/express` to 5).
+  Query strings are now parsed with Express 5's default "simple" parser:
+  the documented forms (`?ids=1,2`, repeated keys, `?limit=`) are
+  unchanged, but bracket syntax such as `?ids[]=1` or `?subscriber[x]=…` is
+  no longer expanded into arrays/objects — those keys are simply ignored.
+  The API process now exits with a fatal log if the HTTP port cannot be
+  bound (Express 5 routes listen errors to the callback instead of crashing).
 - **Summary query indexes (#66).** Covering indexes for the merchant and
   subscriber summary aggregates (`mandates(merchant, status, period, amount)`,
   `charges(merchant, amount)`, `charges(subscriber, amount, fee)`) are added

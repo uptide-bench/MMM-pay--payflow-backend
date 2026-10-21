@@ -62,7 +62,14 @@ if (keeper && runKeeperPass) {
 }
 
 const app = createApp(db, config, indexer.status, indexer.merchantCache, server, adminHooks);
-const http = app.listen(config.PORT, () => {
+// Express 5 hands listen errors (EADDRINUSE, EACCES, ...) to this callback
+// instead of letting them escape as an unhandled 'error' event, so fail fast
+// here rather than run the loops with no API in front of them.
+const http = app.listen(config.PORT, (err?: Error) => {
+  if (err) {
+    logger.fatal({ err, port: config.PORT }, "api failed to listen");
+    process.exit(1);
+  }
   logger.info({ port: config.PORT, network: config.STELLAR_NETWORK }, "api listening");
 });
 
