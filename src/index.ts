@@ -62,7 +62,14 @@ if (keeper && runKeeperPass) {
 }
 
 const app = createApp(db, config, indexer.status, indexer.merchantCache, server, adminHooks);
-const http = app.listen(config.PORT, () => {
+// Express 5 passes listen errors (e.g. EADDRINUSE) to this callback instead
+// of letting them surface as an unhandled 'error' event, so fail fast here —
+// otherwise the process would keep running without serving the API.
+const http = app.listen(config.PORT, (err?: Error) => {
+  if (err) {
+    logger.fatal({ err, port: config.PORT }, "api failed to listen");
+    process.exit(1);
+  }
   logger.info({ port: config.PORT, network: config.STELLAR_NETWORK }, "api listening");
 });
 
