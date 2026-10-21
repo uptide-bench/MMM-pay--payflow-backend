@@ -44,6 +44,10 @@ export function createApp(
   }
 
   const app = express();
+  // Express 5 defaults to the "simple" (node:querystring) parser; keep the
+  // Express 4 qs-based parser so bracketed params (`?merchant[]=G…`) still
+  // reach the filters instead of being dropped, which would widen results.
+  app.set("query parser", "extended");
 
   app.use(
     pinoHttp({
